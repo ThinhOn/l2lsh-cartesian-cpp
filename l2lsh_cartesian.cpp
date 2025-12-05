@@ -13,6 +13,10 @@
 #include <unordered_map>
 #include <vector>
 #include <fstream>
+#include <cmath>
+#include <chrono>
+#include <functional>
+#include <numeric>
 
 
 using namespace stag;
@@ -119,7 +123,7 @@ public:
     // and a query vector q_vec.
     std::vector<std::pair<int, double>>
     query_partition(const std::string &partition_name,
-                    const Eigen::VectorXd &q_vec,
+                    const Vec &q_vec,
                     std::size_t max_results = 50) const;
 
     std::vector<std::string> partition_names() const {
@@ -129,11 +133,10 @@ public:
         return names;
     }
 
-    std::vector<std::pair<int, double>>
-    L2LSHCartesianCpp::search(
-        const Eigen::VectorXd& qvec,
+    SearchResult search(
+        const Vec& qvec,
         const CountMap& constraints,
-        DenseMat& vector_store
+        const DenseMat& vector_store
     ) const;
 
 private:
@@ -264,7 +267,7 @@ void L2LSHCartesianCpp::build_indices() {
 // Query a specific partition by name.
 std::vector<std::pair<int, double>>
 L2LSHCartesianCpp::query_partition(const std::string &partition_name,
-                                   const Eigen::VectorXd &q_vec,
+                                   const Vec &q_vec,
                                    std::size_t max_results) const
 {
     auto it = partitions_.find(partition_name);
@@ -317,19 +320,20 @@ L2LSHCartesianCpp::query_partition(const std::string &partition_name,
 // step 2: pick k_star
 // step 3: sort by distance
 // step 4: return k_pi nearest points
-SearchResult L2LSHCartesianCPP::search(
-    const Eigen::VectorXd& qvec,
+SearchResult
+L2LSHCartesianCpp::search(
+    const Vec& qvec,
     const CountMap& constraints,
-    DenseMat& vector_store
-) const {
+    const DenseMat& vector_store  // currently unused, but kept for signature
+) const
+{
     using Clock = std::chrono::high_resolution_clock;
 
     SearchResult result;
-    std::size_t& total_scan_out = 0;
+    std::size_t total_scan_out = 0;
+    (void)vector_store; // silence unused-parameter warning if you don't use X
 
-    // ---------- 1) Build Cartesian product of constraint tokens ----------
-    // constraints: attr -> { value -> count }
-    // lists: [[ "gender:female", "gender:male" ], [ "age:50-59", "age:60-69", ...], ...]
+    // ---------- 1) build lists for Cartesian product ----------
     std::vector<std::vector<std::string>> lists;
     lists.reserve(constraints.size());
     for (const auto& [attr, values] : constraints) {
@@ -341,7 +345,7 @@ SearchResult L2LSHCartesianCPP::search(
         lists.push_back(std::move(tokens_for_attr));
     }
 
-    // recursive Cartesian product
+    // Cartesian product of tokens
     std::vector<std::vector<std::string>> combos;
     {
         std::vector<std::string> current;
@@ -359,42 +363,42 @@ SearchResult L2LSHCartesianCPP::search(
         dfs(0);
     }
 
-    struct ComboInfo {
-        int requirement;
-        std::vector<std::string> partitions;
-    };
-
-    std::unordered_map<std::vector<std::string>, ComboInfo,
-                       HashKeyHash> combo_info; // reuse HashKeyHash for vectors of strings if you want; or write separate hasher
-
     auto start_search = Clock::now();
 
-    // ---------- 2) Compute requirement & matching partitions per combo ----------
+    // All candidates (id, distance) across combos
+    std::vector<std::pair<int, float>> final_cands;
+
+    // ---------- 2) For each combo, find matching partitions and ANN ----------
     for (const auto& combo : combos) {
-        // requirement = min(counts[attr][val] for token in combo)
+        // requirement = min count for this combination
         int requirement = std::numeric_limits<int>::max();
         for (const auto& token : combo) {
             auto pos = token.find(':');
-            std::string attr = token.substr(0, pos);
+            std::string attr  = token.substr(0, pos);
             std::string value = token.substr(pos + 1);
+
             auto it_attr = constraints.find(attr);
             if (it_attr == constraints.end()) continue;
             auto it_val = it_attr->second.find(value);
             if (it_val == it_attr->second.end()) continue;
             requirement = std::min(requirement, it_val->second);
         }
-        if (requirement == std::numeric_limits<int>::max()) {
-            // no valid counts; skip
+        if (requirement == std::numeric_limits<int>::max() || requirement <= 0)
             continue;
-        }
 
-        // find partitions that contain all tokens in combo
-        std::unordered_set<std::string> combo_set(combo.begin(), combo.end());
+        // find partitions whose name contains all tokens in combo
         std::vector<std::string> matching_parts;
-        for (const auto& [pname, tokens] : partition_tokens) {
+        for (const auto& [pname, part] : partitions_) {
+            (void)part;
+            ParsedMeta pm = parse_metadata_line(pname);
             bool ok = true;
-            for (const auto& t : combo_set) {
-                if (!tokens.count(t)) {
+            for (const auto& token : combo) {
+                auto pos = token.find(':');
+                std::string attr  = token.substr(0, pos);
+                std::string value = token.substr(pos + 1);
+
+                auto it_feat = pm.feats.find(attr);
+                if (it_feat == pm.feats.end() || it_feat->second != value) {
                     ok = false;
                     break;
                 }
@@ -402,117 +406,66 @@ SearchResult L2LSHCartesianCPP::search(
             if (ok) matching_parts.push_back(pname);
         }
 
-        if (!matching_parts.empty()) {
-            combo_info[combo] = ComboInfo{requirement, std::move(matching_parts)};
-        }
-    }
+        if (matching_parts.empty())
+            continue;
 
-    // ---------- 3) For each combo, gather ANN candidates ----------
-    std::vector<std::pair<int, float>> final_cands; // (id, dist)
-    final_cands.reserve(1024);
+        int k_pi = requirement;
 
-    for (const auto& [combo, info] : combo_info) {
-        int k_pi = info.requirement;
-        std::vector<int> all_cands;
+        // Collect candidates for this combo across all matching partitions
+        std::unordered_map<int, float> best_dist_for_id;
 
-        for (const auto& pi : info.partitions) {
-            auto tables_it = tables.find(pi);
-            auto hashes_it = hashes.find(pi);
-            if (tables_it == tables.end() || hashes_it == hashes.end())
-                continue;
+        for (const auto& pi : matching_parts) {
+            // Choose how many candidates to pull from each partition
+            std::size_t k_star = std::max<int>(k_pi * 2, k_pi + 10);
 
-            const TableList& T_list = tables_it->second;
-            const auto& H_list      = hashes_it->second;
-            std::size_t ell         = T_list.size();
+            auto part_results = query_partition(pi, qvec, k_star);
+            total_scan_out += part_results.size();
 
-            int k_star = k_pi + static_cast<int>(std::ceil(2.0 * ell / delta));
-
-            std::vector<int> cands;
-
-            // For each table in this partition
-            for (std::size_t j = 0; j < ell; ++j) {
-                const BucketMap& T = T_list[j];
-                const auto& g      = H_list[j];  // your CompoundHash equivalent
-
-                HashKey key = g.hash(qvec);      // or g(qvec) if operator() implemented
-
-                auto bit = T.find(key);
-                if (bit != T.end()) {
-                    const auto& bucket_ids = bit->second;
-                    cands.insert(cands.end(), bucket_ids.begin(), bucket_ids.end());
+            for (auto& pr : part_results) {
+                int   id   = pr.first;
+                float dist = std::sqrt(static_cast<float>(pr.second)); // query_partition returns dist^2
+                auto it    = best_dist_for_id.find(id);
+                if (it == best_dist_for_id.end() || dist < it->second) {
+                    best_dist_for_id[id] = dist;
                 }
             }
-
-            // deduplicate
-            std::sort(cands.begin(), cands.end());
-            cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
-
-            if (static_cast<int>(cands.size()) > k_star) {
-                cands.resize(k_star);
-            }
-
-            total_scan_out += cands.size();
-            all_cands.insert(all_cands.end(), cands.begin(), cands.end());
         }
 
-        // deduplicate across all partitions
-        std::sort(all_cands.begin(), all_cands.end());
-        all_cands.erase(std::unique(all_cands.begin(), all_cands.end()), all_cands.end());
-
-        // compute distances
-        std::vector<std::pair<int, float>> pairs;
-        pairs.reserve(all_cands.size());
-        for (int id : all_cands) {
-            float dist = l2_distance(qvec, vector_store[id]);
-            pairs.emplace_back(id, dist);
+        // Turn map into vector and take top k_pi
+        std::vector<std::pair<int, float>> combo_cands;
+        combo_cands.reserve(best_dist_for_id.size());
+        for (auto& kv : best_dist_for_id) {
+            combo_cands.emplace_back(kv.first, kv.second);
         }
 
-        // sort by distance
-        std::sort(pairs.begin(), pairs.end(),
+        std::sort(combo_cands.begin(), combo_cands.end(),
                   [](auto const& a, auto const& b) { return a.second < b.second; });
 
-        // top k_pi
-        if (pairs.size() > static_cast<std::size_t>(k_pi))
-            pairs.resize(k_pi);
+        if (combo_cands.size() > static_cast<std::size_t>(k_pi))
+            combo_cands.resize(k_pi);
 
-        final_cands.insert(final_cands.end(), pairs.begin(), pairs.end());
+        final_cands.insert(final_cands.end(),
+                           combo_cands.begin(), combo_cands.end());
     }
 
     auto end_search = Clock::now();
     result.search_time_ms =
         std::chrono::duration<double, std::milli>(end_search - start_search).count();
 
-    // Map IDs to metadata strings, like Python’s:
-    // final_cands = [(metadata_store[cand[0]], cand[1]) ...]
+    // ---------- 3) map ids → metadata ----------
     std::vector<std::pair<std::string, float>> final_cands_str;
     final_cands_str.reserve(final_cands.size());
     for (auto const& [id, dist] : final_cands) {
-        if (id >= 0 && static_cast<std::size_t>(id) < metadata_store.size()) {
-            final_cands_str.emplace_back(metadata_store[id], dist);
+        if (id >= 0 && static_cast<std::size_t>(id) < metadata_store_.size()) {
+            final_cands_str.emplace_back(metadata_store_[id], dist);
         }
     }
 
-    if (final_cands_str.empty()) {
-        return result; // nothing found; solver would return None in Python
-    }
-
-    // ---------- 4) Post-processing: call solver (TODO: your C++ solver) ----------
-    auto start_post = Clock::now();
-
-    // TODO: call your C++ solver equivalent of `build_solver(self.args).solve(...)`
-    // Example:
-    //   Solver solver(args);
-    //   auto solved = solver.solve(final_cands_str, constraints_or_query);
-    // For now, just pass through:
     result.chosen = std::move(final_cands_str);
-
-    auto end_post = Clock::now();
-    result.post_time_ms =
-        std::chrono::duration<double, std::milli>(end_post - start_post).count();
+    // fill postprocessing_time if when add a solver step later
 
     return result;
 }
-
 
 
 int main(int argc, char** argv) {
@@ -563,7 +516,8 @@ int main(int argc, char** argv) {
         std::cout << "  search_term: " << q.search_term
                   << "  text_query_embedding size: "
                   << q.text_query_embedding.size() << "\n";
-        Eigen::VectorXd q_vec = Eigen::Map<const Eigen::VectorXf>(q.text_query_embedding.data(), q.text_query_embedding.size()).cast<float>();
+        // Eigen::VectorXf q_vec = Eigen::Map<const Eigen::VectorXf>(q.text_query_embedding.data(), q.text_query_embedding.size()).cast<float>();
+        Vec q_vec = q.text_query_embedding;
         index.search(q_vec, q.count, X);
         std::exit(0);
     }
