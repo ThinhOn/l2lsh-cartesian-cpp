@@ -32,7 +32,7 @@ struct Query {
     std::unordered_map<std::string,
                        std::unordered_map<std::string, int>> count;
 
-    std::vector<float> text_query_embedding;
+    std::vector<float> vec;
 
     std::vector<std::pair<std::string, float>> ground_truth;
 
@@ -40,6 +40,7 @@ struct Query {
 };
 
 void from_json(const json& j, Query& s);
+void print_query_count(const Query& q);
 
 
 struct SearchResult {

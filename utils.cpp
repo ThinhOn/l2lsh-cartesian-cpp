@@ -1,4 +1,5 @@
 #include "utils.h"
+#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -120,24 +121,33 @@ float collision_probability(float w, float c) {
 
 
 
-
-void from_json(const json& j, Query& s) {
-    s.search_term = j.at("search_term").get<std::string>();
-    s.text_query = j.at("text_query").get<std::string>();
-    s.k = j.at("k").get<int>();
+void from_json(const json& j, Query& q) {
+    q.search_term = j.at("search_term").get<std::string>();
+    q.text_query = j.at("text_query").get<std::string>();
+    q.k = j.at("k").get<int>();
 
     // Nested dict → unordered_map<string, unordered_map<string, int>>
-    s.count = j.at("count").get<
+    q.count = j.at("count").get<
         std::unordered_map<std::string, std::unordered_map<std::string, int>>
     >();
 
     // Embedding list → std::vector<float>
-    s.text_query_embedding = j.at("text_query_embedding").get<std::vector<float>>();
+    q.vec = j.at("text_query_embedding").get<std::vector<float>>();
 
     // List of [string, float] → vector<pair<string, float>>
-    s.ground_truth = j.at("ground_truth").get<
+    q.ground_truth = j.at("ground_truth").get<
         std::vector<std::pair<std::string, float>>
     >();
 
-    s.ground_truth_dist = j.at("ground_truth_dist").get<float>();
+    q.ground_truth_dist = j.at("ground_truth_dist").get<float>();
 };
+
+
+void print_query_count(const Query& q) {
+    for (const auto& [attr, inner_map] : q.count) {
+        std::cout << attr << ":\n";
+        for (const auto& [token, value] : inner_map) {
+            std::cout << "    " << token << " : " << value << "\n";
+        }
+    }
+}

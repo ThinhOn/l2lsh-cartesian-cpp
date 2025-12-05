@@ -23,8 +23,10 @@ using namespace stag;
 using json = nlohmann::json;
 
 using AttrCountMap = std::unordered_map<std::string, int>;
-using CountMap     = std::unordered_map<std::string, AttrCountMap>;
+using CountMap = std::unordered_map<std::string, AttrCountMap>;
 using Vec = std::vector<float>;
+
+using Clock = std::chrono::high_resolution_clock;
 
 
 struct ParsedMeta {
@@ -86,14 +88,14 @@ struct FeatureKeyHash {
     }
 };
 
-// -------------------- per-partition structure --------------------
-
+// -------------------- Per-partition index --------------------
 struct PartitionLSH {
     std::vector<int> ids;                 // row indices in global DenseMat
     std::vector<DataPoint> points;        // DataPoints referencing rows in data_
     std::unique_ptr<E2LSH> index;         // L2 LSH index
     std::unordered_map<const StagReal*, int> ptr2id; // coordinates pointer -> id
 };
+
 
 // -------------------- header --------------------
 
@@ -327,8 +329,6 @@ L2LSHCartesianCpp::search(
     const DenseMat& vector_store  // currently unused, but kept for signature
 ) const
 {
-    using Clock = std::chrono::high_resolution_clock;
-
     SearchResult result;
     std::size_t total_scan_out = 0;
     (void)vector_store; // silence unused-parameter warning if you don't use X
@@ -363,9 +363,18 @@ L2LSHCartesianCpp::search(
         dfs(0);
     }
 
+    // for (const auto& combo : combos) {
+    //     std::cout << "Combo: " ;
+    //     for (const auto& token : combo) {
+    //         std::cout << token << " ";
+    //     }
+    //     std::cout << "\n";
+    // }
+    // std::exit(0);
+
     auto start_search = Clock::now();
 
-    // All candidates (id, distance) across combos
+    // All candidates (id, distance) across relevant partitions
     std::vector<std::pair<int, float>> final_cands;
 
     // ---------- 2) For each combo, find matching partitions and ANN ----------
@@ -462,7 +471,7 @@ L2LSHCartesianCpp::search(
     }
 
     result.chosen = std::move(final_cands_str);
-    // fill postprocessing_time if when add a solver step later
+    //  fill postprocessing_time if when add a solver step later
 
     return result;
 }
@@ -480,26 +489,19 @@ int main(int argc, char** argv) {
 
     // std::cout << "X.row(0) = " << X.row(0) << "\n";
     std::cout << "metadata[0] = " << metadata[0] << "\n";
-
     
     // Protected attribute values for Cartesian product
     auto attr_set = get_all_protected_attributes(metadata);
     std::vector<std::string> protected_attrs(attr_set.begin(), attr_set.end());
 
-    
+    // Build index
     L2LSHCartesianCpp index(
         X,
         metadata,
         protected_attrs,
-        c,
-        r,
-        w
+        c, r, w
     );
     
-    // std::cout << collision_probability(w, r) << "\n";
-    // std::exit(0);
-
-
     // Load query file
     std::ifstream f(
         "./data/"
@@ -513,24 +515,14 @@ int main(int argc, char** argv) {
     std::cout << "Loaded " << queries.size() << " queries.\n";
 
     for (auto &q : queries) {
-        std::cout << "  search_term: " << q.search_term
-                  << "  text_query_embedding size: "
-                  << q.text_query_embedding.size() << "\n";
-        // Eigen::VectorXf q_vec = Eigen::Map<const Eigen::VectorXf>(q.text_query_embedding.data(), q.text_query_embedding.size()).cast<float>();
-        Vec q_vec = q.text_query_embedding;
-        index.search(q_vec, q.count, X);
+        std::cout << "  text_query_embedding size: "
+                  << q.vec.size() << "\n";
+
+        print_query_count(q);
+
+        SearchResult result = index.search(q.vec, q.count, X);
         std::exit(0);
     }
-    // Example query: partition "gender:female__race:hispanic", query = row 2
-    // std::string part_name = "gender:female__race:hispanic";
-    // Eigen::VectorXd q = X.row(2);
-
-    // auto results = index.query_partition(part_name, q, 10);
-
-    // std::cout << "Results for partition " << part_name << ":\n";
-    // for (auto &pr : results) {
-    //     std::cout << "  id = " << pr.first << "  dist2 = " << pr.second << "\n";
-    // }
 
     return 0;
 }

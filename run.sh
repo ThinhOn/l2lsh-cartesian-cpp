@@ -2,7 +2,7 @@
 
 set -e  # stop on errors
 
-FLAGS="-std=c++17 -O2"
+FLAGS="-std=c++17 -O3"
 SOURCES="l2lsh_cartesian.cpp utils.cpp"
 
 INCLUDES=""
