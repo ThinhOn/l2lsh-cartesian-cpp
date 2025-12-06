@@ -151,3 +151,37 @@ void print_query_count(const Query& q) {
         }
     }
 }
+
+
+// Parse strings like "id:0__gender:male__race:hispanic"
+ParsedMeta parse_metadata_line(const std::string &s) {
+    ParsedMeta pm;
+    pm.id = -1;
+
+    std::size_t pos = 0;
+    while (pos < s.size()) {
+        std::size_t next = s.find("__", pos);
+        std::string token = (next == std::string::npos)
+                            ? s.substr(pos)
+                            : s.substr(pos, next - pos);
+
+        std::size_t colon = token.find(':');
+        if (colon != std::string::npos) {
+            std::string key = token.substr(0, colon);
+            std::string val = token.substr(colon + 1);
+
+            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+            std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+
+            if (key == "id") {
+                pm.id = std::stoi(val);
+            } else {
+                pm.feats[key] = val;
+            }
+        }
+
+        if (next == std::string::npos) break;
+        pos = next + 2;
+    }
+    return pm;
+}

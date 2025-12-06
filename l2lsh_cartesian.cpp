@@ -1,6 +1,7 @@
 #include <stag/data.h>
 #include <stag/lsh.h>
 #include "utils.h"
+#include "ILPSolver.h"
 
 #include <Eigen/Dense>
 #include <nlohmann/json.hpp>
@@ -27,45 +28,6 @@ using CountMap = std::unordered_map<std::string, AttrCountMap>;
 using Vec = std::vector<float>;
 
 using Clock = std::chrono::high_resolution_clock;
-
-
-struct ParsedMeta {
-    int id = -1;
-    std::map<std::string, std::string> feats; // attribute -> value
-};
-
-// Parse strings like "id:0__gender:male__race:hispanic"
-ParsedMeta parse_metadata_line(const std::string &s) {
-    ParsedMeta pm;
-    pm.id = -1;
-
-    std::size_t pos = 0;
-    while (pos < s.size()) {
-        std::size_t next = s.find("__", pos);
-        std::string token = (next == std::string::npos)
-                            ? s.substr(pos)
-                            : s.substr(pos, next - pos);
-
-        std::size_t colon = token.find(':');
-        if (colon != std::string::npos) {
-            std::string key = token.substr(0, colon);
-            std::string val = token.substr(colon + 1);
-
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-            std::transform(val.begin(), val.end(), val.begin(), ::tolower);
-
-            if (key == "id") {
-                pm.id = std::stoi(val);
-            } else {
-                pm.feats[key] = val;
-            }
-        }
-
-        if (next == std::string::npos) break;
-        pos = next + 2;
-    }
-    return pm;
-}
 
 using FeatureKey = std::vector<std::pair<std::string, std::string>>;
 
@@ -149,7 +111,8 @@ public:
     SearchResult search(
         const Vec& qvec,
         const CountMap& constraints,
-        const DenseMat& vector_store
+        const DenseMat& vector_store,
+        ILPSolverCpp& solver
     ) const;
 
 private:
@@ -346,7 +309,8 @@ SearchResult
 L2LSHCartesianCpp::search(
     const Vec& qvec,
     const CountMap& constraints,
-    const DenseMat& vector_store  // currently unused, but kept for signature
+    const DenseMat& vector_store,
+    ILPSolverCpp& solver
 ) const
 {
     SearchResult result;
@@ -483,7 +447,7 @@ L2LSHCartesianCpp::search(
 
     std::cout << final_cands_str.size() << " results found.\n";
 
-    result.chosen = std::move(final_cands_str);
+    // result.chosen = std::move(final_cands_str);
     //  fill postprocessing_time if when add a solver step later
 
     return result;
@@ -534,7 +498,14 @@ int main(int argc, char** argv) {
         std::cout << "  constraints:\n";
         print_query_count(q);
 
-        SearchResult result = index.search(q.vec, q.count, X);
+        ILPSolverCpp solver(
+            // allow_soft_counts=true,
+            /*msg=*/true,
+            /*time_limit_ms=*/1000,
+            /*soft_penalty_weight=*/100.0
+        );
+
+        SearchResult result = index.search(q.vec, q.count, X, solver);
         std::exit(0);
     }
 

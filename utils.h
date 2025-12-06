@@ -31,12 +31,14 @@ struct Query {
 
     std::unordered_map<std::string,
                        std::unordered_map<std::string, int>> count;
-
     std::vector<float> vec;
-
     std::vector<std::pair<std::string, float>> ground_truth;
-
     float ground_truth_dist;
+};
+
+struct Candidate {
+    std::string meta;   // same idea as your Python metadata string
+    double distance;    // cost in the objective
 };
 
 void from_json(const json& j, Query& s);
@@ -44,9 +46,25 @@ void print_query_count(const Query& q);
 
 
 struct SearchResult {
+    using CountMap =
+        std::unordered_map<
+            std::string,
+            std::unordered_map<std::string, int>
+        >;
+
+    std::vector<int> indices;
+    double objective = 0.0;
+    CountMap count;  // actual counts in selected set
+    CountMap gaps;   // gap = need - actual
+    float search_time_ms;
     std::vector<std::pair<std::string, float>> chosen;
-    double search_time_ms = 0.0;
-    double post_time_ms   = 0.0;
 };
+
+struct ParsedMeta {
+    int id = -1;
+    std::map<std::string, std::string> feats; // attribute -> value
+};
+
+ParsedMeta parse_metadata_line(const std::string &s);
 
 #endif
