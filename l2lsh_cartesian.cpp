@@ -108,6 +108,7 @@ public:
         const float c = 2.0f,
         const float r = 2.0f,
         const float w = 4.0f,
+        const float delta = 0.1f,
         const int max_query_size = 20
     )
         : data_(data),
@@ -115,8 +116,18 @@ public:
           protected_attrs_(protected_attrs),
           c_(c),
           r_(r),
-          w_(w)
+          w_(w),
+          delta_(delta),
+          max_query_size_(max_query_size)
     {
+        p1_ = collision_probability(w_, r_);
+        p2_ = collision_probability(w_, c_ * r_);
+        rho_ = std::ceil(std::log(1.0f / p1_) / std::log(1.0f / p2_));
+
+        // std::cout << "LSH parameters: p1=" << p1_
+        //           << ", p2=" << p2_
+        //           << ", rho=" << rho_ << "\n";
+        
         build_partitions();
         build_indices();
     }
@@ -145,10 +156,15 @@ private:
     DenseMat &data_;
     std::vector<std::string> metadata_store_;
     std::vector<std::string> protected_attrs_;
-    StagReal c_;
-    StagReal r_;
-    StagReal w_;
-    int max_query_size = 20;  // number of hash functions per table
+    float c_;
+    float r_;
+    float w_;
+    float delta_;
+    int max_query_size_ = 20;  // number of hash functions per table
+
+    float p1_;
+    float p2_;
+    float rho_;
 
     // partition name -> data
     std::unordered_map<std::string, PartitionLSH> partitions_;
@@ -256,13 +272,14 @@ void L2LSHCartesianCpp::build_indices() {
             part.ptr2id[part.points[i].coordinates] = part.ids[i];
         }
 
-        // std::cout << "Building E2LSH for partition " << name
-        //           << " with " << part.ids.size() << " points (K="
-        //           << K_ << ", L=" << L_ << ")\n";
-        
-        int K_=10;
-        int L_=5;
-        part.index = std::make_unique<E2LSH>(K_, L_, part.points);
+        int n = part.ids.size();
+        int K = std::ceil( std::log(n) / std::log(1.0f / p2_) );
+        // int L = std::ceil( std::pow(n, rho_) * std::log(2.0 * max_query_size_ / delta_) );
+        int L = std::ceil( std::log(1.0f/delta_) / (-1.0f * std::log(1 - pow(p1_, K))) );
+        std::cout << "Building E2LSH for partition " << name
+                  << " with " << part.ids.size() << " points (K="
+                  << K << ", L=" << L << ")\n";
+        part.index = std::make_unique<E2LSH>(K, L, part.points);
     }
 }
 
@@ -288,6 +305,9 @@ L2LSHCartesianCpp::query_partition(const std::string &partition_name,
 
     // 2. Get LSH candidate set
     std::vector<DataPoint> cands = part.index->get_near_neighbors(q_dp);
+
+    std::cout << "  Retrieved " << cands.size()
+              << " candidates from partition " << partition_name << "\n";
 
     // 3. Compute distances and map to ids
     std::vector<std::pair<int, double>> out;
@@ -363,15 +383,6 @@ L2LSHCartesianCpp::search(
         dfs(0);
     }
 
-    // for (const auto& combo : combos) {
-    //     std::cout << "Combo: " ;
-    //     for (const auto& token : combo) {
-    //         std::cout << token << " ";
-    //     }
-    //     std::cout << "\n";
-    // }
-    // std::exit(0);
-
     auto start_search = Clock::now();
 
     // All candidates (id, distance) across relevant partitions
@@ -423,11 +434,11 @@ L2LSHCartesianCpp::search(
         // Collect candidates for this combo across all matching partitions
         std::unordered_map<int, float> best_dist_for_id;
 
-        for (const auto& pi : matching_parts) {
+        for (const auto& part : matching_parts) {
             // Choose how many candidates to pull from each partition
             std::size_t k_star = std::max<int>(k_pi * 2, k_pi + 10);
 
-            auto part_results = query_partition(pi, qvec, k_star);
+            auto part_results = query_partition(part, qvec, k_star);
             total_scan_out += part_results.size();
 
             for (auto& pr : part_results) {
@@ -470,6 +481,8 @@ L2LSHCartesianCpp::search(
         }
     }
 
+    std::cout << final_cands_str.size() << " results found.\n";
+
     result.chosen = std::move(final_cands_str);
     //  fill postprocessing_time if when add a solver step later
 
@@ -483,6 +496,7 @@ int main(int argc, char** argv) {
     float c = std::stof(argv[2]);
     float r = std::stof(argv[3]);
     float w = std::stof(argv[4]);
+    float delta = std::stof(argv[5]);
 
     DenseMat X = load_vectors_txt("./data/" + DATASET + "/vectors.txt");
     std::vector<std::string> metadata = load_metadata_txt("./data/" + DATASET + "/metadata.txt");
@@ -499,7 +513,7 @@ int main(int argc, char** argv) {
         X,
         metadata,
         protected_attrs,
-        c, r, w
+        c, r, w, delta
     );
     
     // Load query file
@@ -517,7 +531,7 @@ int main(int argc, char** argv) {
     for (auto &q : queries) {
         std::cout << "  text_query_embedding size: "
                   << q.vec.size() << "\n";
-
+        std::cout << "  constraints:\n";
         print_query_count(q);
 
         SearchResult result = index.search(q.vec, q.count, X);

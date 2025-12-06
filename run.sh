@@ -22,5 +22,6 @@ DATASET=$1
 c=$2
 r=$3
 w=$4
-./$OUTPUT $DATASET $c $r $w
+DELTA=$5
+./$OUTPUT $DATASET $c $r $w $DELTA
 rm $OUTPUT
